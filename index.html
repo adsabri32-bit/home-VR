@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Huis in VR</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #111; color: #eee; font: 14px system-ui, sans-serif; }
+  canvas { display: block; }
+  #hud { position: fixed; left: 12px; top: 12px; max-width: 360px; background: rgba(0,0,0,.6); padding: 10px 12px; border-radius: 10px; line-height: 1.45; }
+  #hud label { display: block; margin-top: 6px; }
+  #msg { margin-top: 4px; color: #ffcf8a; }
+  #help { margin-top: 8px; opacity: .8; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <b>Huis in VR</b>
+  <div id="msg">Model laden...</div>
+  <label><input type="checkbox" id="baked"> Gebakken licht (geen extra lampen)</label>
+  <label><input type="checkbox" id="noclip"> Door muren lopen</label>
+  <div id="help">Bureaublad: klik in het beeld om rond te kijken, W A S D lopen, Shift sneller, H verbergt dit paneel.<br>
+  VR: linker stick lopen, rechter stick draaien. Een ander model: sleep een .glb in het venster of gebruik ?model=naam.glb achter de link.</div>
+</div>
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+const EYE = 1.65, WALK = 1.6, RUN = 3.4, RADIUS = 0.28, SNAP = Math.PI / 6;
+const msg = document.getElementById('msg');
+const bakedBox = document.getElementById('baked');
+const noclipBox = document.getElementById('noclip');
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xaec2d4);
+const rig = new THREE.Group();
+scene.add(rig);
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 200);
+camera.position.y = EYE;
+rig.add(camera);
+
+const lights = new THREE.Group();
+lights.add(new THREE.HemisphereLight(0xffffff, 0xd9d3c9, 1.6));
+lights.add(new THREE.AmbientLight(0xffffff, 0.55));
+const zon = new THREE.DirectionalLight(0xffffff, 1.3);
+zon.position.set(3, 6, 2);
+lights.add(zon);
+scene.add(lights);
+
+let model = null, spawn = null, colliders = [];
+let yaw = 0, pitch = 0;
+const loader = new GLTFLoader();
+const ray = new THREE.Raycaster();
+
+function applyBaked() {
+  const baked = bakedBox.checked;
+  lights.visible = !baked;
+  if (!model) return;
+  model.traverse((o) => {
+    if (!o.isMesh) return;
+    if (!o.userData.orig) o.userData.orig = o.material;
+    if (baked) {
+      const bron = Array.isArray(o.userData.orig) ? o.userData.orig[0] : o.userData.orig;
+      o.material = new THREE.MeshBasicMaterial({
+        map: bron.map || null, color: bron.color ? bron.color.clone() : 0xffffff,
+        side: bron.side, transparent: bron.transparent, opacity: bron.opacity,
+        alphaTest: bron.alphaTest || 0
+      });
+    } else {
+      o.material = o.userData.orig;
+    }
+  });
+}
+bakedBox.addEventListener('change', applyBaked);
+
+function placeAtSpawn() {
+  if (spawn) {
+    const p = new THREE.Vector3(), q = new THREE.Quaternion();
+    spawn.getWorldPosition(p);
+    spawn.getWorldQuaternion(q);
+    const f = new THREE.Vector3(0, 1, 0).applyQuaternion(q);   // pijl van de Blender-empty = lokale Y in glTF
+    f.y = 0;
+    if (f.lengthSq() < 1e-4) f.set(0, 0, -1);
+    f.normalize();
+    rig.position.set(p.x, p.y, p.z);
+    yaw = Math.atan2(-f.x, -f.z);
+  } else {
+    const box = new THREE.Box3().setFromObject(model);
+    const c = box.getCenter(new THREE.Vector3());
+    rig.position.set(c.x, box.min.y, c.z);
+    yaw = 0;
+  }
+  pitch = 0;
+  rig.rotation.y = yaw;
+  camera.rotation.x = 0;
+}
+
+function laad(url, naam) {
+  msg.textContent = 'Laden: ' + naam + '...';
+  loader.load(url, (gltf) => {
+    if (model) scene.remove(model);
+    model = gltf.scene;
+    scene.add(model);
+    model.updateMatrixWorld(true);
+    spawn = null; colliders = [];
+    model.traverse((o) => {
+      if (!spawn && o.name && /^spawn/i.test(o.name)) spawn = o;
+      if (o.isMesh) colliders.push(o);
+    });
+    placeAtSpawn();
+    applyBaked();
+    msg.textContent = naam + ' geladen' + (spawn ? '' : ' (geen Spawn gevonden: start in het midden)');
+  }, (xhr) => {
+    if (xhr.total) msg.textContent = 'Laden ' + Math.round(100 * xhr.loaded / xhr.total) + '%';
+  }, (err) => {
+    msg.textContent = 'Fout bij laden van ' + naam + '. Staat het bestand naast index.html en draait de pagina via een webserver?';
+    console.error(err);
+  });
+}
+
+const param = new URLSearchParams(window.location.search).get('model') || 'huis.glb';
+laad(param, param);
+
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0];
+  if (f) laad(URL.createObjectURL(f), f.name);
+});
+
+// bureaublad-besturing
+const keys = {};
+window.addEventListener('keydown', (e) => {
+  keys[e.code] = true;
+  if (e.code === 'KeyH') document.getElementById('hud').style.display = document.getElementById('hud').style.display === 'none' ? '' : 'none';
+});
+window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+renderer.domElement.addEventListener('click', () => {
+  if (!renderer.xr.isPresenting) renderer.domElement.requestPointerLock();
+});
+window.addEventListener('mousemove', (e) => {
+  if (document.pointerLockElement !== renderer.domElement || renderer.xr.isPresenting) return;
+  yaw -= e.movementX * 0.0022;
+  pitch = Math.max(-1.4, Math.min(1.4, pitch - e.movementY * 0.0022));
+  rig.rotation.y = yaw;
+  camera.rotation.x = pitch;
+});
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+function geblokkeerd(dx, dz) {
+  if (noclipBox.checked || !colliders.length) return false;
+  const lengte = Math.hypot(dx, dz);
+  if (lengte < 1e-6) return false;
+  const o = new THREE.Vector3(rig.position.x, rig.position.y + 0.9, rig.position.z);
+  ray.set(o, new THREE.Vector3(dx / lengte, 0, dz / lengte));
+  ray.far = lengte + RADIUS;
+  const hit = ray.intersectObjects(colliders, false);
+  return hit.length > 0 && hit[0].distance < lengte + RADIUS;
+}
+function beweeg(vx, vz, dt) {
+  const dx = vx * dt, dz = vz * dt;
+  if (!geblokkeerd(dx, 0)) rig.position.x += dx;
+  if (!geblokkeerd(0, dz)) rig.position.z += dz;
+}
+
+let snapKlaar = true;
+const kijk = new THREE.Vector3();
+const klok = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(klok.getDelta(), 0.1);
+  if (renderer.xr.isPresenting) {
+    const sessie = renderer.xr.getSession();
+    for (const bron of sessie.inputSources) {
+      if (!bron.gamepad) continue;
+      const a = bron.gamepad.axes;
+      const x = a.length > 2 ? a[2] : 0, y = a.length > 3 ? a[3] : 0;
+      if (bron.handedness === 'left') {
+        if (Math.hypot(x, y) > 0.15) {
+          camera.getWorldDirection(kijk);
+          const hoek = Math.atan2(-kijk.x, -kijk.z);
+          const sx = x * WALK, sz = y * WALK;
+          beweeg(sx * Math.cos(hoek) + sz * Math.sin(hoek), -sx * Math.sin(hoek) + sz * Math.cos(hoek), dt);
+        }
+      } else if (bron.handedness === 'right') {
+        if (Math.abs(x) > 0.7 && snapKlaar) { rig.rotation.y -= Math.sign(x) * SNAP; snapKlaar = false; }
+        if (Math.abs(x) < 0.3) snapKlaar = true;
+      }
+    }
+  } else {
+    const v = (keys.ShiftLeft || keys.ShiftRight) ? RUN : WALK;
+    let ix = 0, iz = 0;
+    if (keys.KeyW || keys.ArrowUp) iz -= 1;
+    if (keys.KeyS || keys.ArrowDown) iz += 1;
+    if (keys.KeyA || keys.ArrowLeft) ix -= 1;
+    if (keys.KeyD || keys.ArrowRight) ix += 1;
+    if (ix || iz) {
+      const n = Math.hypot(ix, iz);
+      ix = ix / n * v; iz = iz / n * v;
+      beweeg(ix * Math.cos(yaw) + iz * Math.sin(yaw), -ix * Math.sin(yaw) + iz * Math.cos(yaw), dt);
+    }
+  }
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
